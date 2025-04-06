@@ -1,0 +1,1146 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Management;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+using MahApps.Metro.Controls;
+using Microsoft.Win32;
+
+namespace SystemOptimizer
+{
+    /// <summary>
+    /// Interaction logic for MainWindow.xaml
+    /// </summary>
+    public partial class MainWindow : MetroWindow, INotifyPropertyChanged
+    {
+        #region INotifyPropertyChanged Implementation
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        protected virtual void OnPropertyChanged([CallerMemberName] string propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        protected bool SetProperty<T>(ref T storage, T value, [CallerMemberName] string propertyName = null)
+        {
+            if (EqualityComparer<T>.Default.Equals(storage, value))
+                return false;
+
+            storage = value;
+            OnPropertyChanged(propertyName);
+            return true;
+        }
+
+        #endregion
+
+        #region P/Invoke for System Restore
+
+        [DllImport("srclient.dll", CharSet = CharSet.Unicode)]
+        static extern int SRSetRestorePointW(ref RESTOREPTINFO pRestorePtSpec, out STATEMGRSTATUS pSMgrStatus);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct RESTOREPTINFO
+        {
+            public int dwEventType;
+            public int dwRestorePtType;
+            public long llSequenceNumber;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string szDescription;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct STATEMGRSTATUS
+        {
+            public int nStatus;
+            public long llSequenceNumber;
+        }
+
+        public const int BEGIN_SYSTEM_CHANGE = 100;
+        public const int END_SYSTEM_CHANGE = 101;
+        public const int DESKTOP_SETTING = 2;
+
+        #endregion
+
+        #region Properties
+
+        // System Specifications
+        private string _cpuInfo;
+        public string CpuInfo
+        {
+            get => _cpuInfo;
+            set => SetProperty(ref _cpuInfo, value);
+        }
+
+        private string _ramInfo;
+        public string RamInfo
+        {
+            get => _ramInfo;
+            set => SetProperty(ref _ramInfo, value);
+        }
+
+        private string _gpuInfo;
+        public string GpuInfo
+        {
+            get => _gpuInfo;
+            set => SetProperty(ref _gpuInfo, value);
+        }
+
+        private string _storageInfo;
+        public string StorageInfo
+        {
+            get => _storageInfo;
+            set => SetProperty(ref _storageInfo, value);
+        }
+
+        // Progress Tracking
+        private double _progress;
+        public double Progress
+        {
+            get => _progress;
+            set => SetProperty(ref _progress, value);
+        }
+
+        private int _progressPercentage;
+        public int ProgressPercentage
+        {
+            get => _progressPercentage;
+            set => SetProperty(ref _progressPercentage, value);
+        }
+
+        private string _currentTask;
+        public string CurrentTask
+        {
+            get => _currentTask;
+            set => SetProperty(ref _currentTask, value);
+        }
+
+        // Status
+        private string _statusMessage;
+        public string StatusMessage
+        {
+            get => _statusMessage;
+            set => SetProperty(ref _statusMessage, value);
+        }
+
+        private SolidColorBrush _statusIndicatorColor;
+        public SolidColorBrush StatusIndicatorColor
+        {
+            get => _statusIndicatorColor;
+            set => SetProperty(ref _statusIndicatorColor, value);
+        }
+
+        private bool _isOptimizing;
+        public bool IsOptimizing
+        {
+            get => _isOptimizing;
+            set
+            {
+                if (SetProperty(ref _isOptimizing, value))
+                    OnPropertyChanged(nameof(IsNotOptimizing));
+            }
+        }
+
+        public bool IsNotOptimizing => !IsOptimizing;
+
+        // Console Output
+        private string _consoleText;
+        public string ConsoleText
+        {
+            get => _consoleText;
+            set => SetProperty(ref _consoleText, value);
+        }
+
+        // Status Bar Information
+        private string _windowsVersion;
+        public string WindowsVersion
+        {
+            get => _windowsVersion;
+            set => SetProperty(ref _windowsVersion, value);
+        }
+
+        private string _systemStatus;
+        public string SystemStatus
+        {
+            get => _systemStatus;
+            set => SetProperty(ref _systemStatus, value);
+        }
+
+        // Commands
+        public ICommand OptimizeCommand { get; private set; }
+
+        // CPU Information
+        private bool _isAmdRyzen;
+        private bool _isIntelCpu;
+        private int _processorCount;
+
+        #endregion
+    #region Command Implementation
+
+    public class AsyncRelayCommand : ICommand
+    {
+        private readonly Func<Task> _execute;
+        private readonly Func<bool> _canExecute;
+        private bool _isExecuting;
+
+        public AsyncRelayCommand(Func<Task> execute, Func<bool> canExecute = null)
+        {
+            _execute = execute ?? throw new ArgumentNullException(nameof(execute));
+            _canExecute = canExecute;
+        }
+
+        public event EventHandler CanExecuteChanged
+        {
+            add { CommandManager.RequerySuggested += value; }
+            remove { CommandManager.RequerySuggested -= value; }
+        }
+
+        public bool CanExecute(object parameter)
+        {
+            return !_isExecuting && (_canExecute?.Invoke() ?? true);
+        }
+
+        public async void Execute(object parameter)
+        {
+            if (!CanExecute(parameter))
+                return;
+
+            try
+            {
+                _isExecuting = true;
+                CommandManager.InvalidateRequerySuggested();
+
+                await _execute();
+            }
+            finally
+            {
+                _isExecuting = false;
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
+    #endregion
+
+        public MainWindow()
+        {
+            InitializeComponent();
+
+            // Set data context
+            DataContext = this;
+
+            // Initialize properties
+            ConsoleText = "";
+            Progress = 0;
+            ProgressPercentage = 0;
+            CurrentTask = "Ready";
+            StatusMessage = "System Analyzer Ready";
+            StatusIndicatorColor = new SolidColorBrush(Colors.Green);
+            IsOptimizing = false;
+
+            // Initialize commands
+            OptimizeCommand = new AsyncRelayCommand(
+                async () => await RunOptimizationAsync(),
+                () => !IsOptimizing
+            );
+        }
+
+        private void MetroWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            Task.Run(async () =>
+            {
+                await GatherSystemInformationAsync();
+                await CheckSystemHealthAsync();
+            });
+        }
+
+        #region System Information Gathering
+
+        private async Task GatherSystemInformationAsync()
+        {
+            LogToConsole("Starting system analysis...");
+            
+            try
+            {
+                await Task.Run(() =>
+                {
+                    // Retrieve Windows version
+                    var osInfo = GetOsInformation();
+                    WindowsVersion = $"Windows {osInfo}";
+
+                    // Retrieve CPU information
+                    CpuInfo = GetCpuInformation();
+
+                    // Retrieve RAM information
+                    RamInfo = GetRamInformation();
+
+                    // Retrieve GPU information
+                    GpuInfo = GetGpuInformation();
+
+                    // Retrieve Storage information
+                    StorageInfo = GetStorageInformation();
+                });
+
+                LogToConsole("System analysis completed successfully.");
+                SetStatus("System Ready", Colors.Green);
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error during system analysis: {ex.Message}");
+                SetStatus("Error during analysis", Colors.Red);
+            }
+        }
+
+        private string GetOsInformation()
+        {
+            LogToConsole("Getting operating system information...");
+            
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher("SELECT Caption, Version, OSArchitecture FROM Win32_OperatingSystem"))
+                {
+                    foreach (var os in searcher.Get())
+                    {
+                        string caption = os["Caption"].ToString();
+                        string version = os["Version"].ToString();
+                        string architecture = os["OSArchitecture"].ToString();
+                        
+                        return $"{caption} {version} {architecture}";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error retrieving OS information: {ex.Message}");
+            }
+
+            return "Unknown";
+        }
+
+        private string GetCpuInformation()
+        {
+            LogToConsole("Detecting CPU...");
+            
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed FROM Win32_Processor"))
+                {
+                    foreach (var cpu in searcher.Get())
+                    {
+                        string name = cpu["Name"].ToString().Trim();
+                        int cores = Convert.ToInt32(cpu["NumberOfCores"]);
+                        int logicalProcessors = Convert.ToInt32(cpu["NumberOfLogicalProcessors"]);
+                        int clockSpeed = Convert.ToInt32(cpu["MaxClockSpeed"]);
+                        
+                        // Detect if AMD Ryzen
+                        _isAmdRyzen = name.Contains("Ryzen");
+                        _isIntelCpu = name.Contains("Intel");
+                        _processorCount = Environment.ProcessorCount;
+                        
+                        LogToConsole($"CPU detected: {name}");
+                        if (_isAmdRyzen)
+                            LogToConsole("AMD Ryzen processor detected - will apply specific optimizations.");
+                        
+                        return $"{name}\n{cores} Cores, {logicalProcessors} Threads\n{clockSpeed/1000.0:F2} GHz";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error retrieving CPU information: {ex.Message}");
+            }
+
+            return "Unknown";
+        }
+
+        private string GetRamInformation()
+        {
+            LogToConsole("Analyzing system memory...");
+            
+            try
+            {
+                ulong totalCapacity = 0;
+                int memorySpeed = 0;
+                string memoryType = "";
+
+                using (var searcher = new ManagementObjectSearcher("SELECT Capacity, Speed, MemoryType FROM Win32_PhysicalMemory"))
+                {
+                    foreach (var memory in searcher.Get())
+                    {
+                        totalCapacity += Convert.ToUInt64(memory["Capacity"]);
+                        memorySpeed = Convert.ToInt32(memory["Speed"]);
+                        
+                        // Determine memory type
+                        int memTypeValue = Convert.ToInt32(memory["MemoryType"]);
+                        memoryType = memTypeValue switch
+                        {
+                            21 => "DDR2",
+                            24 => "DDR3",
+                            26 => "DDR4",
+                            _ => "RAM"
+                        };
+                    }
+                }
+
+                double totalGb = Math.Round(totalCapacity / (1024.0 * 1024.0 * 1024.0), 2);
+                return $"{totalGb:F2} GB {memoryType}\n{memorySpeed} MHz";
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error retrieving memory information: {ex.Message}");
+            }
+
+            return "Unknown";
+        }
+
+        private string GetGpuInformation()
+        {
+            LogToConsole("Detecting graphics hardware...");
+            
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher("SELECT Name, AdapterRAM FROM Win32_VideoController"))
+                {
+                    foreach (var gpu in searcher.Get())
+                    {
+                        string name = gpu["Name"].ToString().Trim();
+                        ulong ram = 0;
+                        
+                        try
+                        {
+                            ram = Convert.ToUInt64(gpu["AdapterRAM"]);
+                        }
+                        catch
+                        {
+                            // Some GPUs don't report RAM correctly
+                        }
+                        
+                        double ramGb = Math.Round(ram / (1024.0 * 1024.0 * 1024.0), 2);
+                        string ramInfo = ramGb > 0 ? $"\n{ramGb:F2} GB VRAM" : "";
+                        
+                        LogToConsole($"GPU detected: {name}");
+                        return $"{name}{ramInfo}";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error retrieving GPU information: {ex.Message}");
+            }
+
+            return "Unknown";
+        }
+
+        private string GetStorageInformation()
+        {
+            LogToConsole("Analyzing storage devices...");
+            
+            try
+            {
+                var storageInfo = new StringBuilder();
+                
+                using (var searcher = new ManagementObjectSearcher("SELECT Model, Size, MediaType FROM Win32_DiskDrive"))
+                {
+                    foreach (var drive in searcher.Get())
+                    {
+                        string model = drive["Model"].ToString().Trim();
+                        ulong size = Convert.ToUInt64(drive["Size"]);
+                        double sizeGb = Math.Round(size / (1024.0 * 1024.0 * 1024.0), 2);
+                        
+                        string mediaType = "HDD";
+                        try
+                        {
+                            var mediaTypeValue = drive["MediaType"];
+                            if (mediaTypeValue != null && mediaTypeValue.ToString().Contains("SSD"))
+                                mediaType = "SSD";
+                            else if (model.Contains("SSD") || model.Contains("Solid"))
+                                mediaType = "SSD";
+                        }
+                        catch
+                        {
+                            // Some drives don't report media type
+                            if (model.Contains("SSD") || model.Contains("Solid"))
+                                mediaType = "SSD";
+                        }
+                        
+                        if (storageInfo.Length > 0)
+                            storageInfo.AppendLine();
+                        
+                        storageInfo.Append($"{model} ({mediaType})\n{sizeGb:F2} GB");
+                        
+                        LogToConsole($"Storage detected: {model} ({mediaType}) - {sizeGb:F2} GB");
+                    }
+                }
+                
+                return storageInfo.ToString();
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error retrieving storage information: {ex.Message}");
+            }
+
+            return "Unknown";
+        }
+
+        private async Task CheckSystemHealthAsync()
+        {
+            try
+            {
+                LogToConsole("Performing initial system health check...");
+                
+                // Check if system requires optimization
+                bool needsOptimization = await Task.Run(() =>
+                {
+                    // Check for high startup items
+                    var startupCount = GetStartupItemsCount();
+                    bool tooManyStartupItems = startupCount > 10;
+                    
+                    if (tooManyStartupItems)
+                        LogToConsole($"Found {startupCount} startup items - optimization recommended");
+                    
+                    // Check if Game Mode is enabled
+                    bool gameMode = IsGameModeEnabled();
+                    if (!gameMode)
+                        LogToConsole("Windows Game Mode is not enabled - optimization recommended");
+                    
+                    // Check power plan
+                    bool optimalPowerPlan = IsUsingHighPerformancePowerPlan();
+                    if (!optimalPowerPlan)
+                        LogToConsole("Not using High Performance power plan - optimization recommended");
+                    
+                    return tooManyStartupItems || !gameMode || !optimalPowerPlan;
+                });
+                
+                if (needsOptimization)
+                {
+                    SystemStatus = "Optimization Recommended";
+                    SetStatus("System can be optimized", Colors.Orange);
+                }
+                else
+                {
+                    SystemStatus = "System Optimal";
+                    SetStatus("System already optimized", Colors.Green);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error during system health check: {ex.Message}");
+                SystemStatus = "Check Failed";
+                SetStatus("System check failed", Colors.Red);
+            }
+        }
+
+        private int GetStartupItemsCount()
+        {
+            int count = 0;
+            
+            try
+            {
+                // Check HKLM Run
+                using (var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    if (key != null)
+                        count += key.GetValueNames().Length;
+                }
+                
+                // Check HKCU Run
+                using (var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    if (key != null)
+                        count += key.GetValueNames().Length;
+                }
+                
+                // Check Startup folder
+                string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                if (Directory.Exists(startupFolder))
+                {
+                    count += Directory.GetFiles(startupFolder, "*.*").Length;
+                }
+                
+                // Check Task Scheduler for startup tasks
+                try
+                {
+                    using (var taskScheduler = new ManagementObjectSearcher(@"root\Microsoft\Windows\TaskScheduler", 
+                        "SELECT * FROM MSFT_ScheduledTask WHERE Enabled=TRUE AND TaskPath LIKE '%\\Startup%'"))
+                    {
+                        count += taskScheduler.Get().Count;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogToConsole($"Error checking scheduled tasks: {ex.Message}");
+                }
+                
+                return count;
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error checking startup items: {ex.Message}");
+                return 0;
+            }
+        }
+        
+        private bool IsGameModeEnabled()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\GameBar"))
+                {
+                    if (key != null)
+                    {
+                        var value = key.GetValue("AutoGameModeEnabled");
+                        return value != null && Convert.ToInt32(value) == 1;
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error checking Game Mode status: {ex.Message}");
+                return false;
+            }
+        }
+        
+        private bool IsUsingHighPerformancePowerPlan()
+        {
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "powercfg",
+                    Arguments = "/getactivescheme",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    return output.Contains("High performance") || output.Contains("Ultimate Performance");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error checking power plan: {ex.Message}");
+                return false;
+            }
+        }
+        
+        #endregion
+        
+        #region System Optimization
+        
+        private async Task RunOptimizationAsync()
+        {
+            try
+            {
+                // Set up for optimization
+                IsOptimizing = true;
+                Progress = 0;
+                ProgressPercentage = 0;
+                CurrentTask = "Initializing optimization...";
+                SetStatus("Optimization in progress", Colors.Blue);
+                
+                LogToConsole("=== STARTING SYSTEM OPTIMIZATION ===");
+                LogToConsole("This will optimize your system for gaming performance.");
+                
+                // Create restore point first
+                UpdateProgress(5, "Creating system restore point...");
+                bool restorePointCreated = await Task.Run(() => CreateRestorePoint("Before Gaming Optimization"));
+                
+                if (restorePointCreated)
+                    LogToConsole("System restore point created successfully.");
+                else
+                    LogToConsole("WARNING: Failed to create system restore point. Continuing with optimization.");
+                
+                // Apply Windows optimizations
+                UpdateProgress(15, "Applying Windows settings optimizations...");
+                await Task.Run(() => ApplyRegistryOptimizations());
+                
+                // Set game mode
+                UpdateProgress(25, "Enabling Game Mode...");
+                await Task.Run(() => EnableGameMode());
+                
+                // Optimize for CPU specific features
+                UpdateProgress(35, "Applying CPU optimizations...");
+                await Task.Run(() => 
+                {
+                    if (_isAmdRyzen)
+                        ApplyRyzenOptimizations();
+                    else if (_isIntelCpu)
+                        ApplyIntelOptimizations();
+                });
+                
+                // Optimize graphics settings
+                UpdateProgress(50, "Optimizing GPU settings...");
+                await Task.Run(() => ApplyGpuOptimizations());
+                
+                // Optimize network
+                UpdateProgress(65, "Optimizing network settings...");
+                await Task.Run(() => OptimizeNetworkSettings());
+                
+                // Set power plan
+                UpdateProgress(80, "Setting high performance power plan...");
+                await Task.Run(() => SetHighPerformancePowerPlan());
+                
+                // Optimize mouse settings
+                UpdateProgress(90, "Optimizing input device settings...");
+                await Task.Run(() => OptimizeInputSettings());
+                
+                // Complete
+                UpdateProgress(100, "Optimization complete!");
+                LogToConsole("=== OPTIMIZATION COMPLETED SUCCESSFULLY ===");
+                LogToConsole("Your system has been optimized for gaming. It's recommended to restart your PC to apply all changes.");
+                
+                SystemStatus = "Optimized";
+                SetStatus("Optimization completed", Colors.Green);
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"ERROR during optimization: {ex.Message}");
+                SetStatus("Optimization failed", Colors.Red);
+                SystemStatus = "Optimization Failed";
+            }
+            finally
+            {
+                IsOptimizing = false;
+                CurrentTask = "Ready";
+            }
+        }
+        
+        private bool CreateRestorePoint(string description)
+        {
+            try
+            {
+                LogToConsole("Creating system restore point...");
+                
+                // Define restore point
+                RESTOREPTINFO restorePtInfo = new RESTOREPTINFO
+                {
+                    dwEventType = BEGIN_SYSTEM_CHANGE,
+                    dwRestorePtType = DESKTOP_SETTING,
+                    llSequenceNumber = 0,
+                    szDescription = description
+                };
+                
+                // Create the restore point
+                int result = SRSetRestorePointW(ref restorePtInfo, out STATEMGRSTATUS status);
+                
+                return result != 0;
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Failed to create restore point: {ex.Message}");
+                return false;
+            }
+        }
+        
+        private void ApplyRegistryOptimizations()
+        {
+            LogToConsole("Applying registry optimizations...");
+            
+            try
+            {
+                // Disable full-screen optimizations
+                using (var key = Registry.CurrentUser.CreateSubKey(@"System\GameConfigStore"))
+                {
+                    key?.SetValue("GameDVR_FSEBehavior", 2, RegistryValueKind.DWord);
+                    key?.SetValue("GameDVR_HonorUserFSEBehaviorMode", 1, RegistryValueKind.DWord);
+                    key?.SetValue("GameDVR_DXGIHonorFSEWindowsCompatible", 1, RegistryValueKind.DWord);
+                    key?.SetValue("GameDVR_EFSEFeatureFlags", 0, RegistryValueKind.DWord);
+                }
+                LogToConsole("Disabled fullscreen optimizations");
+                
+                // Disable Game DVR
+                using (var key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR"))
+                {
+                    key?.SetValue("AppCaptureEnabled", 0, RegistryValueKind.DWord);
+                }
+                using (var key = Registry.CurrentUser.CreateSubKey(@"System\GameConfigStore"))
+                {
+                    key?.SetValue("GameDVR_Enabled", 0, RegistryValueKind.DWord);
+                }
+                LogToConsole("Disabled Game DVR");
+                
+                // Disable Nagle's algorithm
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"))
+                {
+                    foreach (string subkey in key.GetSubKeyNames())
+                    {
+                        using (var interfaceKey = key.OpenSubKey(subkey, true))
+                        {
+                            if (interfaceKey != null)
+                            {
+                                interfaceKey.SetValue("TcpAckFrequency", 1, RegistryValueKind.DWord);
+                                interfaceKey.SetValue("TCPNoDelay", 1, RegistryValueKind.DWord);
+                            }
+                        }
+                    }
+                }
+                LogToConsole("Disabled Nagle's algorithm (improves network responsiveness)");
+                
+                // Optimize system responsiveness
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"))
+                {
+                    key?.SetValue("SystemResponsiveness", 0, RegistryValueKind.DWord);
+                    key?.SetValue("NetworkThrottlingIndex", 0xffffffff, RegistryValueKind.DWord);
+                }
+                LogToConsole("Optimized system responsiveness");
+                
+                // Optimize Gaming profile
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"))
+                {
+                    key?.SetValue("GPU Priority", 8, RegistryValueKind.DWord);
+                    key?.SetValue("Priority", 6, RegistryValueKind.DWord);
+                    key?.SetValue("Scheduling Category", "High", RegistryValueKind.String);
+                    key?.SetValue("SFIO Priority", "High", RegistryValueKind.String);
+                }
+                LogToConsole("Set high priority for games");
+                
+                // Disable background apps
+                using (var key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"))
+                {
+                    key?.SetValue("GlobalUserDisabled", 1, RegistryValueKind.DWord);
+                }
+                LogToConsole("Disabled background apps");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error during registry optimization: {ex.Message}");
+            }
+        }
+        
+        private void EnableGameMode()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\GameBar"))
+                {
+                    key?.SetValue("AutoGameModeEnabled", 1, RegistryValueKind.DWord);
+                    key?.SetValue("AllowAutoGameMode", 1, RegistryValueKind.DWord);
+                }
+                LogToConsole("Enabled Windows Game Mode");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error enabling Game Mode: {ex.Message}");
+            }
+        }
+        
+        private void ApplyRyzenOptimizations()
+        {
+            LogToConsole("Applying AMD Ryzen-specific optimizations...");
+            
+            try
+            {
+                // Set processor power management
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "powercfg",
+                    Arguments = "/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 2",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                // Apply changes
+                startInfo.Arguments = "/setactive SCHEME_CURRENT";
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                LogToConsole("Enabled aggressive performance boost for Ryzen processors");
+                LogToConsole("Enabled aggressive performance boost for Ryzen processors");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error during Ryzen optimization: {ex.Message}");
+            }
+        
+        private void ApplyIntelOptimizations()
+        {
+            LogToConsole("Applying Intel-specific optimizations...");
+            
+            try
+            {
+                // Set processor power management for Intel
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "powercfg",
+                    Arguments = "/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 3",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                // Apply changes
+                startInfo.Arguments = "/setactive SCHEME_CURRENT";
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                LogToConsole("Enabled aggressive performance boost for Intel processors");
+                
+                // Set core parking
+                startInfo.Arguments = "/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES 100";
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                LogToConsole("Disabled CPU core parking for better gaming performance");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error during Intel optimization: {ex.Message}");
+            }
+        }
+        
+        private void ApplyGpuOptimizations()
+        {
+            LogToConsole("Applying GPU optimizations...");
+            
+            try
+            {
+                // Set GPU power management to prefer maximum performance
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "powercfg",
+                    Arguments = "/setacvalueindex SCHEME_CURRENT SUB_VIDEO VIDECONPOLICY 1",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                // Apply changes
+                startInfo.Arguments = "/setactive SCHEME_CURRENT";
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                LogToConsole("Set GPU power management to prefer maximum performance");
+                
+                // Set registry keys for optimal GPU performance
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"))
+                {
+                    key?.SetValue("SystemResponsiveness", 0, RegistryValueKind.DWord);
+                }
+                
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"))
+                {
+                    key?.SetValue("GPU Priority", 8, RegistryValueKind.DWord);
+                    key?.SetValue("Priority", 6, RegistryValueKind.DWord);
+                }
+                
+                LogToConsole("Applied additional GPU performance optimizations");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error applying GPU optimizations: {ex.Message}");
+            }
+        }
+        
+        private void OptimizeNetworkSettings()
+        {
+            LogToConsole("Optimizing network settings...");
+            
+            try
+            {
+                // Disable auto-tuning of TCP/IP
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "netsh",
+                    Arguments = "interface tcp set global autotuninglevel=disabled",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                // Set DNS flush
+                startInfo.Arguments = "interface ip delete arpcache";
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                }
+                
+                // Set network priority for games
+                using (var key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Policies\Microsoft\Windows\Psched"))
+                {
+                    key?.SetValue("NonBestEffortLimit", 0, RegistryValueKind.DWord);
+                }
+                
+                LogToConsole("Optimized network settings for reduced latency");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error optimizing network settings: {ex.Message}");
+            }
+        }
+        
+        private void SetHighPerformancePowerPlan()
+        {
+            LogToConsole("Setting high performance power plan...");
+            
+            try
+            {
+                // Try to set to Ultimate Performance first if available (Windows 10 1803+)
+                ProcessStartInfo startInfo = new ProcessStartInfo
+                {
+                    FileName = "powercfg",
+                    Arguments = "/setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",  // Ultimate Performance GUID
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.WaitForExit();
+                    // If Ultimate Performance is not available, fall back to High Performance
+                    if (process.ExitCode != 0)
+                    {
+                        startInfo.Arguments = "/setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";  // High Performance GUID
+                        using (Process fallbackProcess = Process.Start(startInfo))
+                        {
+                            fallbackProcess.WaitForExit();
+                        }
+                    }
+                }
+                
+                LogToConsole("Configured power plan for maximum performance");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error setting high performance power plan: {ex.Message}");
+            }
+        }
+        
+        private void OptimizeInputSettings()
+        {
+            LogToConsole("Optimizing mouse and keyboard settings...");
+            
+            try
+            {
+                // Disable mouse acceleration
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Control Panel\Mouse"))
+                {
+                    key?.SetValue("MouseSpeed", "0", RegistryValueKind.String);
+                    key?.SetValue("MouseThreshold1", "0", RegistryValueKind.String);
+                    key?.SetValue("MouseThreshold2", "0", RegistryValueKind.String);
+                }
+                
+                // Set polling rate (requires logout to take effect)
+                try
+                {
+                    using (var key = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Services\mouclass\Parameters"))
+                    {
+                        key?.SetValue("MouseDataQueueSize", 20, RegistryValueKind.DWord);
+                        key?.SetValue("MousePollingRate", 1, RegistryValueKind.DWord);
+                    }
+                    LogToConsole("Optimized mouse polling rate");
+                }
+                catch (Exception ex)
+                {
+                    LogToConsole($"Failed to set mouse polling rate: {ex.Message}");
+                }
+                
+                LogToConsole("Disabled mouse acceleration");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error optimizing input settings: {ex.Message}");
+            }
+        }
+        
+        #endregion
+        
+        #region Utility Methods
+        
+        private readonly object _logLock = new object();
+        
+        private void LogToConsole(string message)
+        {
+            string timestamp = DateTime.Now.ToString("HH:mm:ss");
+            string formattedMessage = $"[{timestamp}] {message}";
+            
+            lock (_logLock)
+            {
+                // Update the UI on the UI thread
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    if (string.IsNullOrEmpty(ConsoleText))
+                        ConsoleText = formattedMessage;
+                    else
+                        ConsoleText = ConsoleText + Environment.NewLine + formattedMessage;
+                });
+            }
+        }
+        
+        private void SetStatus(string message, Color color)
+        {
+            // Update status on UI thread
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                StatusMessage = message;
+                StatusIndicatorColor = new SolidColorBrush(color);
+            });
+        }
+        
+        private void UpdateProgress(double value, string task)
+        {
+            // Update progress on UI thread
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                Progress = value;
+                ProgressPercentage = (int)value;
+                CurrentTask = task;
+                LogToConsole(task);
+            });
+        }
+        
+        private string DetermineStorageType(string model)
+        {
+            // Basic heuristic - can be improved
+            if (model.Contains("SSD") || model.Contains("Solid") || model.Contains("NVME") || model.Contains("PCIe"))
+                return "SSD";
+            return "HDD";
+        }
+        
+        #endregion
+    }
+}
