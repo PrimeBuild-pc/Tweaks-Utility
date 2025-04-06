@@ -1,0 +1,39 @@
+# .NET build directories and files
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.user
+*.suo
+*.cache
+*.vs
+*.vscode
+.vs/
+_ReSharper*/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# NuGet packages
+packages/
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+
+# Other unnecessary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/ 
