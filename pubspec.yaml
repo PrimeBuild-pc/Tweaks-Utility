@@ -1,0 +1,29 @@
+name: windows_optimizer
+description: A Windows optimization app for performance tweaks
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  system_info2: ^4.0.0
+  win32: ^5.0.0
+  flutter_animate: ^4.5.0
+  google_fonts: ^6.1.0
+  provider: ^6.1.1
+  shared_preferences: ^2.2.2
+  http: ^1.1.0
+  path_provider: ^2.1.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/
+    - assets/icon/

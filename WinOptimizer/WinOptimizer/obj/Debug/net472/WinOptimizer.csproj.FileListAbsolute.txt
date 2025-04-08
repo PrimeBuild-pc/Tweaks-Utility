@@ -1,0 +1,12 @@
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\WinOptimizer.csproj.AssemblyReference.cache
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\WinOptimizer.csproj.SuggestedBindingRedirects.cache
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\WinOptimizer.exe.config
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\Resources\Styles\Colors.baml
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\Resources\Styles\Icons.baml
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\App.baml
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\MainWindow.g.cs
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\Views\DashboardView.g.cs
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\Views\MainWindow.g.cs
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\App.g.cs
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\WinOptimizer_MarkupCompile.cache
+C:\Users\Administrator\Desktop\tweaks\app\WinOptimizer\WinOptimizer\obj\Debug\net472\WinOptimizer_MarkupCompile.lref
